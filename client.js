@@ -34,11 +34,19 @@ window.__ModuleLoader__.load({
     const DEFAULT_WEB_URL = 'https://chat.deepseek.com/'; // 设置页的默认网页地址
     const DEFAULT_MODE = 'chat'; // 默认启动模式：聊天（避免无意消耗 token）
 
-    // 标题栏切换控件的左偏移（px，从窗口左边缘算起）。
-    // 参考：preload 注入的 Windows 菜单栏从 48px 开始，[应用]≈48px + 2px 间隙 +
-    // [编辑]≈48px ≈ 146px；这里取 154px，让控件落在「编辑」右侧约 8px 处。
-    // 语言/字体/缩放导致位置不合适时，只需改这一个常量。
+    // 标题栏切换控件的左偏移「兜底值」（px，从窗口左边缘算起）。
+    // 正常运行时不再依赖它：控件会实时测量 preload 注入的原生菜单宿主
+    // [data-windows-menu] 的右边界，再留出 TITLEBAR_MENU_GAP 的间距。
+    // 参考（兜底依据）：菜单栏从 48px 开始，[应用]≈48px + 2px 间隙 + [编辑]≈48px ≈ 146px。
+    // 只在量不到菜单宿主时（非 Windows 标题栏 / preload 未注入）才用这个值。
     const TITLEBAR_LEFT_OFFSET = 154;
+
+    // 原生 Windows 菜单宿主选择器（由 preload 的 installWindowsMenu() 注入）。
+    // 它的 :host 是 fixed 定位，left 跟随 --dsh-windows-menu-start（展开 48px、收起 84px）。
+    const WINDOWS_MENU_SELECTOR = '[data-windows-menu]';
+
+    // 插件控件与原生菜单右边界之间保留的间距（px）。
+    const TITLEBAR_MENU_GAP = 8;
 
     // 标题栏高度兜底（px）。html 上的 --dsh-windows-titlebar-height 由 preload 设为 40px。
     const TITLEBAR_HEIGHT_FALLBACK = 40;
@@ -1083,10 +1091,119 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // 标题栏控件的动态左偏移：测量原生菜单宿主 [data-windows-menu] 的右边界，
+    // 让整组控件跟随菜单移动（收起侧栏时菜单从 48px 移到 84px，「新建聊天」按钮出现）。
+    // 不轮询：只在窗口尺寸变化、菜单自身尺寸变化、侧栏折叠状态变化时重新测量。
+    // 测不到菜单（Web 环境 / preload 未注入）时回退到 TITLEBAR_LEFT_OFFSET。
+    function useTitlebarLeftOffset() {
+      const [left, setLeft] = React.useState(TITLEBAR_LEFT_OFFSET);
+      React.useEffect(() => {
+        let disposed = false;
+        const timers = [];
+        let menuNode = null;
+        let menuObserver = null;
+        let layoutObserver = null;
+        let attributeObserver = null;
+
+        const measure = () => {
+          if (disposed) return;
+          let next = TITLEBAR_LEFT_OFFSET;
+          try {
+            const menu = document.querySelector(WINDOWS_MENU_SELECTOR);
+            if (menu) {
+              const rect = menu.getBoundingClientRect();
+              // width 为 0 说明菜单还没布局完成（或已隐藏），保留兜底值，等下一次测量。
+              if (rect.width > 0 && rect.right > 0) next = Math.round(rect.right) + TITLEBAR_MENU_GAP;
+            }
+          } catch {
+            // 保持兜底值
+          }
+          setLeft((current) => (current === next ? current : next));
+        };
+
+        // 直接同步测量：窗口被遮挡时浏览器会节流 requestAnimationFrame，
+        // 而侧栏折叠会立刻改变菜单右边界，必须当场跟随，否则会出现短暂重叠。
+        const schedule = () => {
+          if (disposed) return;
+          measure();
+        };
+
+        // 菜单宿主可能因窗口重建而更换节点；尺寸变化（菜单文字/语言）时重新测量右边界。
+        const watchMenu = () => {
+          const menu = document.querySelector(WINDOWS_MENU_SELECTOR);
+          if (menu === menuNode) return;
+          if (menuObserver) menuObserver.disconnect();
+          menuObserver = null;
+          menuNode = menu;
+          if (!menu || typeof ResizeObserver !== 'function') return;
+          menuObserver = new ResizeObserver(schedule);
+          try {
+            menuObserver.observe(menu);
+          } catch {
+            menuObserver = null;
+          }
+        };
+
+        // 首次挂载时菜单可能还没注入：做几次有界补偿测量（首屏布局稳定后即可量到）。
+        const settleTimers = [0, 120, 500].map((delay) =>
+          setTimeout(() => {
+            watchMenu();
+            schedule();
+          }, delay),
+        );
+        timers.push(...settleTimers);
+
+        // 窗口尺寸变化（含最大化/还原、显示缩放变化）。
+        window.addEventListener('resize', schedule);
+
+        // 侧栏折叠状态变化时，原生菜单左边界会变（CSS :has 改 --dsh-windows-menu-start），
+        // 而菜单自身宽度可能完全不变（ResizeObserver 捕获不到纯位置平移），所以必须监听属性。
+        if (typeof MutationObserver === 'function') {
+          attributeObserver = new MutationObserver(() => {
+            watchMenu();
+            schedule();
+          });
+          try {
+            attributeObserver.observe(document.body, {
+              attributes: true,
+              subtree: true,
+              attributeFilter: ['data-sidebar-collapsed'],
+            });
+          } catch {
+            attributeObserver = null;
+          }
+        }
+
+        // 标题栏区域尺寸变化（布局列宽变化等）。
+        if (typeof ResizeObserver === 'function' && document.documentElement) {
+          layoutObserver = new ResizeObserver(schedule);
+          try {
+            layoutObserver.observe(document.documentElement);
+          } catch {
+            layoutObserver = null;
+          }
+        }
+
+        watchMenu();
+        schedule();
+
+        return () => {
+          disposed = true;
+          for (const timer of timers) clearTimeout(timer);
+          window.removeEventListener('resize', schedule);
+          if (menuObserver) menuObserver.disconnect();
+          if (attributeObserver) attributeObserver.disconnect();
+          if (layoutObserver) layoutObserver.disconnect();
+        };
+      }, []);
+      return left;
+    }
+
     // 标题栏控件：紧凑分段切换（聊天/工作）+ 很小的「诊断」开关。
-    // 位置：标题栏「编辑」菜单右侧（固定左偏移常量），垂直居中；两种模式下都可见。
+    // 位置：动态跟随标题栏「编辑」菜单右侧（保留小间距），垂直居中；两种模式下都可见。
     function TitlebarControls() {
       useSpike();
+      const menuLeft = useTitlebarLeftOffset();
       const chat = state.mode === 'chat';
       return h(
         'div',
@@ -1095,7 +1212,7 @@ window.__ModuleLoader__.load({
           style: {
             position: 'fixed',
             top: 'calc((var(--dsh-windows-titlebar-height, ' + TITLEBAR_HEIGHT_FALLBACK + 'px) - 26px) / 2)',
-            left: TITLEBAR_LEFT_OFFSET,
+            left: menuLeft,
             display: 'flex',
             alignItems: 'center',
             gap: 6,
