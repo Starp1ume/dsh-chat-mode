@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Chat / Work Modes",
+    "description": "Chat mode embeds the official DeepSeek web chat (no DSH API calls, no token usage); Work mode is the native DSH agent UI."
+  }
+}

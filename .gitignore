@@ -1,0 +1,28 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 备份与临时文件
+backup/
+backup-*/
+*.bak
+*.tmp
+*.temp
+temp/
+tmp/
+*.swp
+*~
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

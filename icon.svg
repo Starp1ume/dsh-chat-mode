@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="WebView Spike">
+  <rect x="6" y="10" width="34" height="26" rx="7" fill="#4d6bfe"/>
+  <path d="M14 36 L14 45 L24 36 Z" fill="#4d6bfe"/>
+  <rect x="24" y="24" width="34" height="26" rx="7" fill="#1f2430" stroke="#8fa2ff" stroke-width="2"/>
+  <path d="M33 41 L40 48 L50 33" fill="none" stroke="#8fa2ff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

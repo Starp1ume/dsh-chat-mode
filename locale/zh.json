@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "聊天 / 工作双模式",
+    "description": "聊天模式内嵌 DeepSeek 官方网页版（不调用 DSH API、不消耗 token）；工作模式为 DSH 原生 Agent 界面。"
+  }
+}

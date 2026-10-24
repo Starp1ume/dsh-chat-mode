@@ -1,0 +1,4 @@
+- insert:
+    - id: chat-mode
+      name: '@local/dsh-chat-mode'
+      config: {}
