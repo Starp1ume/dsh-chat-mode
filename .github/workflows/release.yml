@@ -1,0 +1,73 @@
+# 自动发布：创建 GitHub Release 前必须先通过同一套 secret 扫描。
+# 这是“发布守卫”的后半段：即使 tag 已经推送，扫描失败也不会生成 Release 产物。
+#
+# 局限（务必知情）：push/tag 事件在内容上传之后才触发，工作流无法阻止或撤销推送。
+# 若发布时扫描失败，请删除 tag、回退提交，并轮换可能已泄露的凭证。
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  secret-scan:
+    # 注意：这里刻意与 secret-scan.yml 的 job 名区分，避免两个工作流产生同名检查项。
+    name: release-secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout（完整历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 扫描 git 跟踪文件
+        run: node scripts/scan-secrets.mjs
+
+      - name: 扫描 git 历史新增行与危险文件名
+        run: node scripts/scan-secrets.mjs --history
+
+  publish-release:
+    name: publish-github-release
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: 仅接受 tag 触发
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::请从 tag 上运行（当前 ref: ${GITHUB_REF}）"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 的 version ${version} 不一致"
+            exit 1
+          fi
+
+      - name: 创建 GitHub Release（扫描已通过才会执行）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag

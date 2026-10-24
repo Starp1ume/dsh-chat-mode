@@ -18,7 +18,7 @@
 
 前置条件：Windows 上的 DSH 桌面端（开发与测试版本为 0.2.1-rc.3），并且当前会话可以执行工具（plugin_manager）。
 
-1. 克隆本仓库（例如 `git clone <仓库地址> dsh-chat-mode`）。
+1. 克隆本仓库（`git clone https://github.com/Starp1ume/dsh-chat-mode.git dsh-chat-mode`）。
 2. 保持该目录在原位。安装时 DSH 会把它以 **Junction（目录链接）** 的方式链到 profile 的 `node_modules/@local/dsh-chat-mode`，**之后不要移动、重命名或删除该目录**，否则插件会失效。
 3. 在 DSH 的对话里让 agent 安装，例如：
 
@@ -75,6 +75,31 @@
 - **平台与版本**：仅在 Windows + DSH 0.2.1-rc.3 测试过。DSH 升级后（尤其是桌面端 webview 租约接口变化时）插件可能失效，需要重新适配。
 - **记住登录有边界**：只恢复 `userToken` 一项；如果 token 过期或站点改版，仍需重新登录。在网页里主动退出登录后，插件会清除已保存的登录副本（该检测依赖页面跳转，未必每次都能识别；如果退出后仍被自动登录，请到设置里手动点「清除已保存登录」）。恢复时登录页会闪一下再进入已登录状态；恢复失败会自动清除已保存副本并停留在登录页，不会报错。
 - **标题栏是桌面端原生区域**：不同缩放比例下若按钮与系统按钮重叠，请通过上面的常量微调。
+
+## 开发与发布自查
+
+仓库自带一个 secret 扫描脚本，供本地自查和 GitHub Actions 使用。它**不包含在 npm 打包产物里**（`scripts/` 与 `.github/` 不在 `package.json` 的 `files` 列表）；但如果通过 `git clone` 安装，这两个目录仍会随仓库下载到本机，只是插件运行时不会用到它们。
+
+```powershell
+node scripts/scan-secrets.mjs            # 默认：扫描 git 跟踪文件在工作区里的内容
+node scripts/scan-secrets.mjs --staged   # 提交前：只扫描暂存区（最接近下一次提交的内容）
+node scripts/scan-secrets.mjs --history  # 全部历史：新增行 + 曾出现过的危险文件名
+node scripts/scan-secrets.mjs --all      # 连同未跟踪文件一起扫描
+```
+
+建议加一个本地 pre-commit 钩子（可选）：
+
+```sh
+node scripts/scan-secrets.mjs --staged
+```
+
+### CI 能保证什么、不能保证什么
+
+- **PR 合入 main 之前**：把 `secret-scan` 设为必需状态检查（仓库 **Settings → Rules → Rulesets**，对 main 启用 “Require status checks to pass”，并把 `secret-scan` 加进去），扫描失败时 PR 无法合并。注意：仓库 owner 需要在 GitHub 上完成这一配置，工作流文件本身无法强制它生效。
+- **打 tag 之后**：`release` 工作流（`.github/workflows/release.yml`）会先跑同一套扫描，扫描失败就不会创建 GitHub Release；它还会校验 tag 与 `package.json` 版本一致。
+- **不能保证**：`git push` 或 tag 推送本身无法被工作流阻止或撤销——push 事件是在内容已经上传之后才触发的。如果推送后扫描才失败，需要删除 tag / 回退提交，并**轮换可能已泄露的凭证**。
+
+工作流里用 `fetch-depth: 0` 拉完整历史，否则 `--history` 看不到旧提交。
 
 ## 反馈模板
 
