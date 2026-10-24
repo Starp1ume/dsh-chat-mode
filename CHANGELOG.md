@@ -16,7 +16,7 @@
 
 ### 已知限制
 
-- 仅在 Windows + DSH 0.2.1-rc.2 上测试过；其他系统 / 版本未验证。
+- 仅在 Windows + DSH 0.2.1-rc.3 上测试过；其他系统 / 版本未验证。
 - 标题栏按钮左偏移 `TITLEBAR_LEFT_OFFSET = 154` 与聊天层顶部偏移 `CHAT_LAYER_TOP = 34` 是在作者机器的分辨率 / 缩放下测量的，不同缩放比例下可能需要调整（改 `client.js` 顶部常量后完全退出重启生效）。
 - 依赖 DSH 桌面端未公开的 webview 租约机制（`dshDesktop.browser.acquire/release`），DSH 升级后可能失效。
 - 记住登录只恢复 `userToken`；token 过期、站点改版等场景仍需重新登录；恢复时登录页会短暂显示。
