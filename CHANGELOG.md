@@ -1,5 +1,20 @@
 # Changelog
 
+## 未发布
+
+### 新增
+
+- 发布前 secret 扫描：`scripts/scan-secrets.mjs`（本地可跑，支持 `--staged` / `--history` / `--all` / `--dir`）与 `.github/workflows/secret-scan.yml`（push / PR / merge queue 自动跑）。两者不包含在 npm 打包产物里（不在 `package.json` 的 `files` 中），但 `git clone` 安装时会随仓库下载。
+- `.github/workflows/release.yml`：打 `v*` tag 时先跑同一套扫描，通过后才创建 GitHub Release，并校验 tag 与 `package.json` 版本一致。
+
+### 修复
+
+- secret 扫描补上暂存区模式（`--staged`）：按 git index 内容检查，防止“先暂存含凭证的文件、再把工作区改干净”绕过检查。
+- secret 扫描的历史模式补上危险文件名检查（如历史提交过 `.env` 后删除）；同时覆盖插件登录副本 `{ v, token, savedAt }` 这种独立 `token` 字段的字面量。
+- 文档改为按真实范围说明：CI 只能保证 PR 合入前拦截、tag 后阻止创建 Release；已经 push 的内容无法由工作流撤销。
+- 取消对扫描脚本与两个工作流文件的整体免检（原 `SELF` 集合）：工作区、暂存区、历史扫描都会检查这两个工作流与扫描脚本自身；实测不存在模式定义误报，动态凭据引用（如 `${{ github.token }}`）正常通过，没有加任何文件级豁免。
+- 历史模式的文件名检查改用 NUL 分隔的 `git log --raw -z` 输出解析真实路径，覆盖新增、删除、重命名、复制涉及的路径，正确处理中文、空格和特殊字符；不再依赖 `diff --git` 标题正则。
+
 ## 0.1.0 — 2026-10-24（初版）
 
 首个可试用版本。
