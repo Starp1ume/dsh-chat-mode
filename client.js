@@ -9,15 +9,21 @@
 // 本文件实现：
 //   - 标题栏「聊天 / 工作」分段切换（工作模式警示色 + title 提示）
 //   - 聊天层常驻保活：只切 display，不卸载 DOM、不重载页面
-//   - 设置页：默认启动模式、网页版地址（https 校验）、记住上次模式、登录恢复开关
-//   - 「带入工作模式」：读剪贴板 → 确认/编辑对话框 → setDraft 只填入、不发送
+//   - 聊天模式下遮住 DSH 标题栏左上角「收起侧栏」按钮（被聊天层盖住、点了没效果）
+//   - 设置页：默认启动模式、网页版地址（https 校验）、记住上次模式、登录恢复开关、
+//     「带入工作」模板
+//   - 「带入工作模式」一键：读网页当前选中的文字（只读 getSelection().toString()）→
+//     切到工作模式 → 模板 + 选中文字用 setDraft 只填入、不发送；
+//     没有选中文字 / 脚本失败时回退到原来的粘贴对话框
 //   - 登录恢复（可选，默认关）：只处理 localStorage.userToken 一项，明文存插件
 //     localStorage；恢复失败自动清除；详细方案见 research/formal-plan.md §7
 //
 // 明确不做：
-//   - 不读 document.cookie / IndexedDB / 页面 DOM，不分析用户输入内容
-//   - 除登录恢复（只 userToken 一项）外不调用 executeJavaScript
-//   - 不保存、不上报任何数据；token 不发送到任何地方；无后台轮询或定时请求
+//   - 不读 document.cookie / IndexedDB / 页面 DOM（只执行下面两类固定脚本：
+//     登录恢复只读写 userToken；「带入工作」只读 window.getSelection().toString()）
+//   - 不分析、不保存用户输入内容；读到的选中文字只放内存、用完即清，不写任何存储
+//   - 除上述固定脚本外不调用 executeJavaScript；不保存、不上报任何数据；
+//     token / 选中文字不发送到任何地方；无后台轮询或定时请求
 // ============================================================================
 
 window.__ModuleLoader__.load({
@@ -48,6 +54,12 @@ window.__ModuleLoader__.load({
     // 插件控件与原生菜单右边界之间保留的间距（px）。
     const TITLEBAR_MENU_GAP = 8;
 
+    // 聊天模式下把原生菜单左移到这个位置（px），让菜单回到隐藏按钮原来的左边缘，
+    // 消除标题栏左侧空白。只覆盖 DSH 的 CSS 变量 --dsh-windows-menu-start，
+    // 且只在受控期间生效（html[data-chat-mode-hide-toggle="1"]）；撤销属性后自动恢复
+    // DSH 原值（展开 48px、收起 84px）。依赖 DSH 的变量名，改版失效时只是空白回来。
+    const CHAT_MODE_MENU_START = 12;
+
     // 标题栏高度兜底（px）。html 上的 --dsh-windows-titlebar-height 由 preload 设为 40px。
     const TITLEBAR_HEIGHT_FALLBACK = 40;
 
@@ -55,6 +67,40 @@ window.__ModuleLoader__.load({
     // 初始值 34 来自用户按截图估算（聊天页 logo y≈30，工作模式 logo y≈64，差 34px）；
     // 不依赖 --dsh-frame-top-clearance，微调时只改这一个常量。
     const CHAT_LAYER_TOP = 34;
+
+    // ------------------------------------------------------------------
+    // 聊天模式下隐藏 DSH 标题栏左上角按钮（受控样式，只作用于下列按钮）
+    // 展开状态：侧栏开关，aria-label 为「收起侧边栏 / Collapse sidebar」；
+    // 收起状态：同一个开关变为「打开侧边栏 / Open sidebar」，标题栏还多一个「新建会话 / New session」图标。
+    // 这些按钮没有稳定的 data-* 属性，class 是构建时自动生成的，因此只能按 aria-label 精确匹配；
+    // 收起态的新会话图标用 [data-sidebar-collapsed="true"] 限定，避免误隐藏展开态侧栏里的同名按钮。
+    // ------------------------------------------------------------------
+    // 常量开关：false 时完全不注入样式/属性，按钮保持原样。
+    const HIDE_DSH_SIDEBAR_BUTTON = true;
+    // 挂在 <html> 上的属性名；聊天层可见时设为 "1"，撤销时移除。
+    const DSH_SIDEBAR_HIDE_ATTR = 'data-chat-mode-hide-toggle';
+    // 注入 <head> 的受控样式：只隐藏这些按钮（仍占位，不影响标题栏布局），并把标题栏原生菜单左移，
+    // 消除隐藏按钮左侧的空白。两条规则挂在同一个 <style> 里，随受控属性一起撤销。
+    // 菜单左移只覆盖 --dsh-windows-menu-start（DSH 用它给 preload 菜单宿主设 left），
+    // 切换条仍按「菜单右边界 + 8px」动态测量，所以两者会一起移动、不会重叠。
+    const DSH_SIDEBAR_HIDE_CSS =
+      [
+        'html[' + DSH_SIDEBAR_HIDE_ATTR + '="1"] button[aria-label="收起侧边栏"]',
+        'html[' + DSH_SIDEBAR_HIDE_ATTR + '="1"] button[aria-label="Collapse sidebar"]',
+        'html[' + DSH_SIDEBAR_HIDE_ATTR + '="1"] button[aria-label="打开侧边栏"]',
+        'html[' + DSH_SIDEBAR_HIDE_ATTR + '="1"] button[aria-label="Open sidebar"]',
+        'html[' + DSH_SIDEBAR_HIDE_ATTR + '="1"] [data-sidebar-collapsed="true"] button[aria-label="新建会话"]',
+        'html[' + DSH_SIDEBAR_HIDE_ATTR + '="1"] [data-sidebar-collapsed="true"] button[aria-label="New session"]',
+      ].join(', ') +
+      ' { visibility: hidden !important; pointer-events: none !important; }' +
+      '\nhtml[' + DSH_SIDEBAR_HIDE_ATTR + '="1"][data-windows-titlebar] { --dsh-windows-menu-start: ' +
+      CHAT_MODE_MENU_START + 'px !important; }';
+
+    // ------------------------------------------------------------------
+    // 「带入工作」一键带入（读取网页中选中的文字）
+    // ------------------------------------------------------------------
+    const BRING_SELECTION_MAX_CHARS = 20000; // 选中文字上限（超出截断并在界面提示）
+    const DEFAULT_BRING_TEMPLATE = '以下是我在网页聊天里得出的要点，请整理并记住：\n\n';
 
     // ------------------------------------------------------------------
     // 登录恢复（正式功能，可选，仅限 userToken 一项）
@@ -79,6 +125,11 @@ window.__ModuleLoader__.load({
     // 只读 location.pathname（判断恢复后是否仍在登录页）：
     const SCRIPT_READ_PATHNAME =
       '(() => { try { return location.pathname || ""; } catch (error) { return ""; } })()';
+    // 只读用户当前选中的文字（window.getSelection().toString()）：不读 DOM 其他内容、
+    // 不读输入框/聊天记录；只在用户点击「带入工作」且页面 origin 完全等于官方站点时执行。
+    const SCRIPT_READ_SELECTION =
+      '(() => { try { const selection = window.getSelection(); ' +
+      'return String(selection ? selection.toString() : ""); } catch (error) { return ""; } })()';
 
     // 只用已确认存在的主题变量（getComputedStyle 检查结果显示在诊断面板），并带同色系兜底，
     // 避免深字配深底：bg-base 与 label-primary 是成对的中性色，border 用于区分边界。
@@ -96,6 +147,7 @@ window.__ModuleLoader__.load({
       rememberLogin: false, // 是否记住登录（默认关；只处理 userToken）
       lastMode: 'chat', // 内部值：上次模式（rememberLast 开启时使用）
       diagOpen: false, // 诊断面板是否展开（仅本地界面偏好）
+      bringTemplate: DEFAULT_BRING_TEMPLATE, // 「带入工作」一键带入时加在选中文字前的模板
     };
 
     function normalizeWebUrl(value) {
@@ -166,6 +218,10 @@ window.__ModuleLoader__.load({
       prefs.rememberLogin = parsed.rememberLogin === true;
       prefs.lastMode = parsed.lastMode === 'work' ? 'work' : 'chat';
       prefs.diagOpen = parsed.diagOpen === true;
+      if (typeof parsed.bringTemplate === 'string') {
+        // 模板只做长度上限保护（不解释内容）；空字符串是合法值（= 不加前缀）
+        prefs.bringTemplate = parsed.bringTemplate.slice(0, 4000);
+      }
     }
 
     function savePrefs(patch) {
@@ -210,6 +266,7 @@ window.__ModuleLoader__.load({
         busy: false,
         error: '',
         notice: '',
+        toast: '', // 一键带入的短暂提示（例如"已截断到 20000 字"），只显示固定文字
       },
       // 登录恢复状态（只用于显示状态与长度，绝不保存/显示 token 值本身）
       login: {
@@ -229,6 +286,7 @@ window.__ModuleLoader__.load({
     let inspectTimer = null;
     let hostContainer = null;
     let maskTimer = null; // 加载遮罩兜底定时器（8 秒）
+    let toastTimer = null; // 「带入工作」简短提示的自动清除定时器
 
     // ------------------------------------------------------------------
     // 登录恢复的存储（token 只在内存里；持久化只在 LOGIN_KEY，明文、单键）
@@ -428,11 +486,11 @@ window.__ModuleLoader__.load({
     // 这里只把 actions 存到模块变量，供标题栏按钮调用；绝不调用 submit。
     let composerBridge = { sessionId: null, actions: null };
 
-    function openBringDialog() {
+    function openBringDialog(notice) {
       state.bring.open = true;
       state.bring.busy = false;
       state.bring.error = '';
-      state.bring.notice = '';
+      state.bring.notice = typeof notice === 'string' ? notice : '';
       // 对话框默认空文本框；剪贴板只在用户点击「读取剪贴板」时读取一次
       state.bring.text = '';
       notify();
@@ -513,6 +571,98 @@ window.__ModuleLoader__.load({
           result === 'no-session'
             ? '工作模式还没有打开的会话：请先在「工作」里新建或打开一个会话，再重新点「带入工作」。'
             : '填入失败：输入框暂时不可用，请重试或手动粘贴到输入框。';
+        notify();
+      }, 120);
+    }
+
+    // 一键带入的短暂提示（只显示固定文字；6 秒后自动消失）
+    function showBringToast(text) {
+      if (toastTimer) clearTimeout(toastTimer);
+      state.bring.toast = typeof text === 'string' ? text : '';
+      notify();
+      toastTimer = setTimeout(() => {
+        toastTimer = null;
+        state.bring.toast = '';
+        notify();
+      }, 6000);
+    }
+
+    // 一键带入：用户点击「带入工作」时调用。
+    // 只在官方 origin（完全相等）的 webview 上、由用户点击触发执行固定脚本；
+    // 读到的选中文字只放内存，填入后立即丢弃，不写存储、不打印内容。
+    function startBringFromSelection() {
+      if (state.bring.busy) return;
+      const view = element;
+      let currentUrl = '';
+      try {
+        currentUrl = view && typeof view.getURL === 'function' ? view.getURL() : '';
+      } catch {
+        currentUrl = '';
+      }
+      if (!view || typeof view.executeJavaScript !== 'function' || !isChatOrigin(currentUrl)) {
+        openBringDialog(
+          '当前没有可用的官方聊天页面（或 webview 尚未创建）：未读取选中文字，请手动粘贴到下方文本框。',
+        );
+        return;
+      }
+      state.bring.busy = true;
+      notify();
+      Promise.resolve()
+        .then(() => view.executeJavaScript(SCRIPT_READ_SELECTION))
+        .then((raw) => {
+          state.bring.busy = false;
+          const selection = typeof raw === 'string' ? raw : '';
+          if (!selection.trim()) {
+            openBringDialog(
+              '没有读到选中的文字：请先在网页里选中文字再点「带入工作」；也可以手动粘贴到下方文本框。',
+            );
+            return;
+          }
+          let text = selection;
+          let truncated = false;
+          if (text.length > BRING_SELECTION_MAX_CHARS) {
+            text = text.slice(0, BRING_SELECTION_MAX_CHARS);
+            truncated = true;
+          }
+          const template =
+            typeof prefs.bringTemplate === 'string' ? prefs.bringTemplate : DEFAULT_BRING_TEMPLATE;
+          deliverBringText(template + text, text.length, truncated);
+        })
+        .catch(() => {
+          state.bring.busy = false;
+          openBringDialog('读取选中文字失败：请手动粘贴到下方文本框。');
+        });
+    }
+
+    // 把「模板 + 选中文字」只填入工作模式输入框（不发送）；失败时回退到原对话框并给原提示。
+    function deliverBringText(composed, chars, truncated) {
+      state.bring.busy = true;
+      if (state.mode !== 'work') switchMode('work');
+      setTimeout(() => {
+        const result = fillWorkDraft(composed);
+        state.bring.busy = false;
+        if (result === 'ok') {
+          // 只记录固定文字与字数；正文立即丢弃（不写存储、不打印）
+          record('已带入选中文字（' + chars + ' 字，未发送）');
+          if (truncated) {
+            showBringToast(
+              '选中文字超过 ' +
+                BRING_SELECTION_MAX_CHARS +
+                ' 字，已截断到 ' +
+                BRING_SELECTION_MAX_CHARS +
+                ' 字',
+            );
+          }
+          if (state.bring.open) closeBringDialog();
+          notify();
+          return;
+        }
+        openBringDialog('');
+        state.bring.error =
+          result === 'no-session'
+            ? '工作模式还没有打开的会话：请先在「工作」里新建或打开一个会话，再重新点「带入工作」。'
+            : '填入失败：输入框暂时不可用，请重试或手动粘贴到输入框。';
+        state.bring.text = composed;
         notify();
       }, 120);
     }
@@ -610,6 +760,11 @@ window.__ModuleLoader__.load({
         clearTimeout(maskTimer);
         maskTimer = null;
       }
+      if (toastTimer) {
+        clearTimeout(toastTimer);
+        toastTimer = null;
+      }
+      state.bring.toast = '';
     }
 
     function retryWebview() {
@@ -1158,16 +1313,18 @@ window.__ModuleLoader__.load({
 
         // 侧栏折叠状态变化时，原生菜单左边界会变（CSS :has 改 --dsh-windows-menu-start），
         // 而菜单自身宽度可能完全不变（ResizeObserver 捕获不到纯位置平移），所以必须监听属性。
+        // 同理，受控隐藏开关（data-chat-mode-hide-toggle）会把菜单左移 12px，
+        // 这里也监听它，保证属性切换后立刻重新测量、不会沿用旧位置。
         if (typeof MutationObserver === 'function') {
           attributeObserver = new MutationObserver(() => {
             watchMenu();
             schedule();
           });
           try {
-            attributeObserver.observe(document.body, {
+            attributeObserver.observe(document.documentElement, {
               attributes: true,
               subtree: true,
-              attributeFilter: ['data-sidebar-collapsed'],
+              attributeFilter: ['data-sidebar-collapsed', DSH_SIDEBAR_HIDE_ATTR, 'data-windows-titlebar'],
             });
           } catch {
             attributeObserver = null;
@@ -1197,6 +1354,68 @@ window.__ModuleLoader__.load({
         };
       }, []);
       return left;
+    }
+
+    // ------------------------------------------------------------------
+    // 受控隐藏 DSH 标题栏按钮（用属性开关 + 一条样式规则，仍占位、布局不变）
+    // ------------------------------------------------------------------
+    // 为什么不用遮罩：该按钮 z-index:30，在 overlay 层（z-index:20）之上，遮罩盖不住也挡不到点击；
+    // 这里改为在聊天层可见时隐藏它。
+    // 选择器只认 aria-label（中英）与 data-sidebar-collapsed，不使用自动生成的 class，不修改其它元素。
+    let sidebarHideStyle = null;
+
+    function applySidebarToggleHiding() {
+      try {
+        if (!HIDE_DSH_SIDEBAR_BUTTON) return;
+        if (typeof document === 'undefined' || !document.documentElement) return;
+        // 只在聊天模式、聊天层可见（webview 桥可用）时隐藏
+        if (state.mode !== 'chat' || state.bridge !== 'ok') return;
+        // 规则本身只匹配上述按钮，没有匹配对象时无副作用，因此不需要先 querySelector 探测。
+        if (!sidebarHideStyle) {
+          const style = document.createElement('style');
+          style.setAttribute('data-chat-mode-style', 'hide-dsh-sidebar-toggle');
+          style.textContent = DSH_SIDEBAR_HIDE_CSS;
+          (document.head || document.documentElement).appendChild(style);
+          sidebarHideStyle = style;
+        }
+        document.documentElement.setAttribute(DSH_SIDEBAR_HIDE_ATTR, '1');
+      } catch {
+        // 任何异常都按"撤销"处理，不影响插件其它功能
+        clearSidebarToggleHiding();
+      }
+    }
+
+    // 统一清理函数：移除 <html> 上的属性 + 删除注入的 <style>；幂等，可在任何时机调用。
+    function clearSidebarToggleHiding() {
+      try {
+        if (typeof document !== 'undefined' && document.documentElement) {
+          document.documentElement.removeAttribute(DSH_SIDEBAR_HIDE_ATTR);
+        }
+      } catch {
+        // 忽略
+      }
+      try {
+        if (sidebarHideStyle && sidebarHideStyle.parentNode) {
+          sidebarHideStyle.parentNode.removeChild(sidebarHideStyle);
+        }
+      } catch {
+        // 忽略
+      }
+      sidebarHideStyle = null;
+    }
+
+    // 无 UI 的同步组件：按「模式 / webview 桥 / 开关」启用或撤销受控隐藏。
+    // 条件不满足（工作模式、聊天层不可见、开关关闭）时立即撤销；组件卸载时也撤销。
+    // 插件被整体卸载时的兜底清理在 apply 的 ctx.effect 里。
+    function SidebarToggleHider() {
+      useSpike();
+      const active = HIDE_DSH_SIDEBAR_BUTTON && state.mode === 'chat' && state.bridge === 'ok';
+      React.useEffect(() => {
+        if (active) applySidebarToggleHiding();
+        else clearSidebarToggleHiding();
+        return () => clearSidebarToggleHiding();
+      }, [active]);
+      return null;
     }
 
     // 标题栏控件：紧凑分段切换（聊天/工作）+ 很小的「诊断」开关。
@@ -1271,8 +1490,8 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 ref: noDrag,
-                title: '把剪贴板中的文字经确认后填入工作模式的输入框（不会自动发送）',
-                onClick: openBringDialog,
+                title: '把网页里选中的文字（加模板）填入工作模式输入框（只填入，不自动发送）',
+                onClick: startBringFromSelection,
                 style: {
                   font: 'inherit',
                   fontSize: 11,
@@ -1499,11 +1718,14 @@ window.__ModuleLoader__.load({
               '覆盖判断：点「覆盖检查(3s)」，聊天层变半透明，若能看到侧栏/标题栏/输入框说明未覆盖；' +
               '看不到则说明被覆盖（这正是聊天模式想要的效果）。\n' +
               '网络声明：本插件代码无 fetch / XHR / WebSocket / sendBeacon / window.open；' +
-              '只有登录恢复使用 executeJavaScript（固定脚本字符串，token 仅以数据形式传入）。\n' +
-              '存储声明：只写插件自己的 localStorage 两个键——dsh-chat-mode:prefs:v1（设置/模式偏好）' +
-              '与 dsh-chat-mode:login:v1（仅 userToken 一项，明文，默认关闭）；' +
-              '不读取 document.cookie、其它 localStorage 项、IndexedDB 或页面内容。\n' +
-              '带入工作模式：只调用 inputActions.setDraft 填入草稿，绝不自动发送；内容不保存、不上报。\n' +
+              'executeJavaScript 只用于登录恢复（固定脚本，token 仅作数据传入）与「带入工作」' +
+              '读取 window.getSelection().toString()（用户点击、官方 origin 完全相等时，固定脚本）。\n' +
+              '存储声明：只写插件自己的 localStorage 两个键——dsh-chat-mode:prefs:v1（设置/模式偏好/' +
+              '带入模板）与 dsh-chat-mode:login:v1（仅 userToken 一项，明文，默认关闭）；' +
+              '不读取 document.cookie、其它 localStorage 项、IndexedDB 或页面内容；' +
+              '读到的选中文字只放内存，用完即清，不写任何存储。\n' +
+              '带入工作模式：只调用 inputActions.setDraft 填入（模板 + 选中文字），绝不自动发送；' +
+              '不读取聊天记录或输入框已有内容；内容不保存、不上报。\n' +
               '登录恢复：「保存登录」只在用户点击、开关开启且当前 origin 为 https://chat.deepseek.com 时执行；' +
               '恢复只在首次加载后尝试一次，失败自动清除副本并静默回到正常登录页，不弹错；' +
               '用户主动退出后本次运行不再自动恢复。',
@@ -1599,6 +1821,8 @@ window.__ModuleLoader__.load({
       const [urlNotice, setUrlNotice] = React.useState('');
       const [urlWarning, setUrlWarning] = React.useState('');
       const [urlConfirmHost, setUrlConfirmHost] = React.useState('');
+      const [templateDraft, setTemplateDraft] = React.useState(prefs.bringTemplate);
+      const [templateNotice, setTemplateNotice] = React.useState('');
       const sectionStyle = { marginBottom: 14 };
       const titleStyle = { fontWeight: 600, fontSize: 13, marginBottom: 6 };
       const hintStyle = { fontSize: 12, opacity: 0.78, marginTop: 4, lineHeight: 1.6 };
@@ -1762,6 +1986,65 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { ...sectionStyle, borderTop: '1px solid ' + BORDER_COLOR, paddingTop: 12 } },
+          h('div', { style: titleStyle }, '带入工作'),
+          h(
+            'div',
+            { style: { ...hintStyle, marginBottom: 6 } },
+            '在聊天网页里选中文字后点标题栏「带入工作」：把下面模板 + 选中文字填入工作模式输入框（只填入、不自动发送）。没有选中文字时会打开原来的粘贴对话框。',
+          ),
+          h('textarea', {
+            value: templateDraft,
+            rows: 3,
+            spellCheck: false,
+            onChange: (event) => {
+              setTemplateDraft(event.target.value);
+              setTemplateNotice('');
+            },
+            style: {
+              width: '100%',
+              boxSizing: 'border-box',
+              resize: 'vertical',
+              minHeight: 64,
+              font: 'inherit',
+              fontSize: 12,
+              lineHeight: 1.6,
+              padding: '8px',
+              borderRadius: 6,
+              border: '1px solid ' + BORDER_COLOR,
+              background: 'transparent',
+              color: 'inherit',
+            },
+          }),
+          h(
+            'div',
+            { style: { ...rowStyle, marginTop: 8 } },
+            button(
+              '保存模板',
+              () => {
+                updatePrefs({ bringTemplate: String(templateDraft || '').slice(0, 4000) });
+                setTemplateDraft(prefs.bringTemplate);
+                setTemplateNotice('已保存，下次点「带入工作」生效。');
+              },
+              { active: true },
+            ),
+            button('恢复默认模板', () => {
+              updatePrefs({ bringTemplate: DEFAULT_BRING_TEMPLATE });
+              setTemplateDraft(DEFAULT_BRING_TEMPLATE);
+              setTemplateNotice('已恢复默认模板。');
+            }),
+          ),
+          templateNotice ? h('div', { style: hintStyle }, templateNotice) : null,
+          h(
+            'div',
+            { style: hintStyle },
+            '模板与本页其它设置存在同一个插件 localStorage 键中，不会上传。选中文字超过 ' +
+              BRING_SELECTION_MAX_CHARS +
+              ' 字会截断并提示；读到的选中文字只放内存，不写存储，填入后不自动发送。',
+          ),
+        ),
+        h(
+          'div',
+          { style: { ...sectionStyle, borderTop: '1px solid ' + BORDER_COLOR, paddingTop: 12 } },
           h('div', { style: titleStyle }, '登录恢复（可选）'),
           h(
             'div',
@@ -1884,16 +2167,51 @@ window.__ModuleLoader__.load({
                 '因此聊天模式不会覆盖应用。请确认在 DSH 桌面端主窗口运行。',
             )
           : null,
+        // 聊天层可见时隐藏 DSH 标题栏「收起侧栏」按钮（受控样式，无 UI）
+        h(SidebarToggleHider),
         h(TitlebarControls),
         h(DiagnosticsPanel),
         h(BringDialog),
+        // 一键带入的短暂提示（固定文字，不显示选中文字正文）
+        state.bring.toast
+          ? h(
+              'div',
+              {
+                style: {
+                  position: 'fixed',
+                  top: 'calc(var(--dsh-windows-titlebar-height, ' +
+                    TITLEBAR_HEIGHT_FALLBACK +
+                    'px) + 8px)',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  zIndex: 62,
+                  pointerEvents: 'none',
+                  padding: '6px 12px',
+                  borderRadius: 8,
+                  background: 'var(--dsw-alias-bg-base, #fff)',
+                  border: '1px solid ' + BORDER_COLOR,
+                  color: LABEL_COLOR,
+                  fontSize: 12,
+                  boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+                },
+              },
+              state.bring.toast,
+            )
+          : null,
       );
     }
 
     function apply(ctx) {
       try {
-        // 插件卸载时释放 webview 租约（ctx.effect 的返回值即清理函数）
-        ctx.effect(() => () => releaseWebview(), 'dsh-chat-mode:webview');
+        // 插件卸载 / apply 失败时的统一清理：撤销受控隐藏（属性 + <style>）+ 释放 webview 租约。
+        // ctx.effect 的返回值即清理函数，插件卸载时由 Cordis 调用。
+        ctx.effect(
+          () => () => {
+            clearSidebarToggleHiding();
+            releaseWebview();
+          },
+          'dsh-chat-mode:cleanup',
+        );
         // 常驻 overlay：聊天层 + 标题栏切换控件 + 诊断面板 + 带入工作对话框
         ctx.slots.inject('shell.overlay', () =>
           ctx.slots.register(
@@ -1916,6 +2234,8 @@ window.__ModuleLoader__.load({
           ),
         );
       } catch (error) {
+        // apply 出错：确保不留下受控隐藏的属性和样式
+        clearSidebarToggleHiding();
         try {
           console.error('[chat-mode] apply 失败:', firstLine(error));
         } catch {
