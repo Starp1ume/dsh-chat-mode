@@ -13,8 +13,10 @@
 //   - 设置页：默认启动模式、网页版地址（https 校验）、记住上次模式、登录恢复开关、
 //     「带入工作」模板
 //   - 「带入工作模式」一键：读网页当前选中的文字（只读 getSelection().toString()）→
-//     切到工作模式 → 模板 + 选中文字用 setDraft 只填入、不发送；
-//     没有选中文字 / 脚本失败时回退到原来的粘贴对话框
+//     切到工作模式 → 模板 + 选中文字用 captureInsertion + insertText 在光标处插入
+//     （不覆盖已有草稿、不发送）；没有选中文字 / 脚本失败时回退到原来的粘贴对话框；
+//     没有可用会话时暂存为「待带入草稿」（纯内存、最多 10 分钟），
+//     工作模式顶部提示条供用户选择「填入当前会话」或「取消」
 //   - 登录恢复（可选，默认关）：只处理 localStorage.userToken 一项，明文存插件
 //     localStorage；恢复失败自动清除；详细方案见 research/formal-plan.md §7
 //
@@ -101,6 +103,10 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     const BRING_SELECTION_MAX_CHARS = 20000; // 选中文字上限（超出截断并在界面提示）
     const DEFAULT_BRING_TEMPLATE = '以下是我在网页聊天里得出的要点，请整理并记住：\n\n';
+    // 待带入草稿的内存保留时长：超过 10 分钟自动清除（一次性定时器，不写存储）。
+    const PENDING_BRING_TTL_MS = 10 * 60 * 1000;
+    // 提示条「填入当前会话」在无可用会话 / startSession 不可用时显示的固定文案（不拼接任何内容）。
+    const BRING_NO_TARGET_TEXT = '请先点 DSH 的『新会话』或选择一个会话，选定后会自动填入';
 
     // ------------------------------------------------------------------
     // 登录恢复（正式功能，可选，仅限 userToken 一项）
@@ -267,6 +273,8 @@ window.__ModuleLoader__.load({
         error: '',
         notice: '',
         toast: '', // 一键带入的短暂提示（例如"已截断到 20000 字"），只显示固定文字
+        pending: null, // 待带入草稿的展示信息 { chars, truncated }；正文只在内存变量里
+        filling: false, // 提示条「填入当前会话」正在等待无会话路径的自动填入（只临时禁用按钮，不代表没有会话）
       },
       // 登录恢复状态（只用于显示状态与长度，绝不保存/显示 token 值本身）
       login: {
@@ -461,6 +469,8 @@ window.__ModuleLoader__.load({
       if (mode !== 'chat' && mode !== 'work') return;
       if (state.mode === mode) return;
       state.mode = mode;
+      // 切回聊天模式时丢弃内存中的待带入草稿（不跨模式保留，也不写任何存储）
+      if (mode === 'chat') clearPendingBring();
       saveMode(mode);
       record(mode === 'chat' ? '切换 → 聊天模式' : '切换 → 工作模式');
       notify();
@@ -481,10 +491,25 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     // 「带入工作模式」：只填入、不发送（发送由用户自己决定）
     // ------------------------------------------------------------------
-    // composer 桥：注册在 conversation.composer.dock（session 作用域）的无 UI 组件
-    // 会通过标准 prop 收到 inputActions（setDraft / insertText / submit 等），
-    // 这里只把 actions 存到模块变量，供标题栏按钮调用；绝不调用 submit。
-    let composerBridge = { sessionId: null, actions: null };
+    // composer 桥：注册在 conversation.input.left（session 作用域，hero/composer 两种输入条都会渲染）
+    // 的无 UI 组件，会通过标准 prop 收到 inputActions 与 sessionId（见 live Slot 目录 standardProps）。
+    // mounted=true 表示当前真的挂着一个可用的会话输入框；只有 mounted 时才拿 actions，
+    // 不再用「最近一次上报的 sessionId」这种可能过期的值判断当前状态。
+    let composerBridge = { mounted: false, sessionId: null, actions: null };
+    // apply 时保存的 Client root Context：点击「填入当前会话」时用它惰性取 ctx.get('uiWorkspace')。
+    let appCtx = null;
+
+    // 待带入草稿：每次带入都先放在内存里，由提示条让用户选择目标会话：
+    //   - 带入时已有会话（originSessionId 非空）：只有切到另一个/新建会话才自动填入；
+    //   - 带入时在新会话窗口（originSessionId 为 null）：之后在任意会话桥接挂载即算「选定」，自动填入。
+    // 结构 { id, composed, chars, truncated, originSessionId }；不写任何存储，新的覆盖旧的，正文用完即清除。
+    let pendingBring = null;
+    let pendingBringSeq = 0;
+    let pendingBringTimer = null;
+    // 已被自动填入尝试过的 pendingBring.id：模块级记录，桥接组件重挂载（hero→composer、模式切换）也不会重复自动填入。
+    let pendingAutoAttemptedId = 0;
+    // 「填入当前会话」在无挂载会话时调用 uiWorkspace.startSession 后的兜底定时器（防止按钮一直等待）。
+    let pendingFillTimer = null;
 
     function openBringDialog(notice) {
       state.bring.open = true;
@@ -533,16 +558,152 @@ window.__ModuleLoader__.load({
       notify();
     }
 
-    // 只调用 setDraft 填入草稿；不调用 submit / 不发送。
+    // 只插入草稿、不发送：用 captureInsertion + insertText 在光标处插入，
+    // 避免 setDraft 整段替换覆盖用户已有内容。
+    // 依据（research/extract/conversation-client.js）：
+    //   - setDraft 会 root.clear() 后重写整段草稿（:14667-14688，注释 "Replace the whole draft"）；
+    //   - insertText 带草稿版本守卫：span.draftRev 与当前 rev 不一致、或输入框正在提交/裁定/已销毁时
+    //     返回 false（:14912-14921），因此用户改动过草稿时不会强行插入。
+    // 返回 'ok' | 'no-session'（桥/会话不可用）| 'failed'（插入被拒绝）。
     function fillWorkDraft(text) {
-      const actions = composerBridge.actions;
-      if (!actions || typeof actions.setDraft !== 'function') return 'no-session';
+      const actions = composerBridge.mounted ? composerBridge.actions : null;
+      if (!actions || typeof actions.captureInsertion !== 'function' || typeof actions.insertText !== 'function') {
+        return 'no-session';
+      }
       try {
-        actions.setDraft(text);
-        return 'ok';
+        const span = actions.captureInsertion();
+        if (!span) return 'failed';
+        const applied = actions.insertText(text, span);
+        return applied === false ? 'failed' : 'ok';
       } catch {
         return 'failed';
       }
+    }
+
+    // 待带入草稿：只更新 UI 展示信息（字数/是否截断），正文仍在内存变量里。
+    function refreshPendingBringState() {
+      state.bring.pending = pendingBring
+        ? { chars: pendingBring.chars, truncated: pendingBring.truncated }
+        : null;
+      notify();
+    }
+
+    // 清除待带入草稿（填入成功 / 取消 / 切回聊天模式 / 超时共用）；幂等，不写存储。
+    function clearPendingBring() {
+      if (pendingBringTimer) {
+        clearTimeout(pendingBringTimer);
+        pendingBringTimer = null;
+      }
+      if (pendingFillTimer) {
+        clearTimeout(pendingFillTimer);
+        pendingFillTimer = null;
+      }
+      state.bring.filling = false;
+      if (!pendingBring) return;
+      pendingBring = null;
+      refreshPendingBringState();
+    }
+
+    // 暂存待带入草稿（新的覆盖旧的）；10 分钟后一次性定时器自动清除。
+    // originSessionId 是点击「带入工作」时的当前会话（拿不到时为 null，表示带入时尚无会话）。
+    function setPendingBring(composed, chars, truncated, originSessionId) {
+      pendingBringSeq += 1;
+      if (pendingFillTimer) {
+        clearTimeout(pendingFillTimer);
+        pendingFillTimer = null;
+      }
+      state.bring.filling = false;
+      pendingBring = {
+        id: pendingBringSeq,
+        composed,
+        chars,
+        truncated,
+        originSessionId: typeof originSessionId === 'string' && originSessionId ? originSessionId : null,
+      };
+      if (pendingBringTimer) {
+        clearTimeout(pendingBringTimer);
+        pendingBringTimer = null;
+      }
+      pendingBringTimer = setTimeout(() => {
+        pendingBringTimer = null;
+        if (!pendingBring) return;
+        pendingBring = null;
+        state.bring.pending = null;
+        record('待带入草稿已过期清除'); // 只记录固定文字，不记录正文
+      }, PENDING_BRING_TTL_MS);
+      refreshPendingBringState();
+    }
+
+    // 提示条按钮「填入当前会话」：任何状态都可点（不再按「有没有会话」置灰）。
+    //   - 桥接组件当前已挂载（有可用的会话输入框）：在光标处插入，不新建会话；
+    //   - 桥接组件未挂载（新会话窗口 / 空白窗口）：调用 ctx.uiWorkspace.startSession(undefined)
+    //     新建并打开一个空白会话，然后由 ComposerBridge 在新会话挂载后按自动填入规则填入一次。
+    //     点击后按钮临时禁用（filling）直到填入完成或失败，防止连点。
+    //   - startSession 不可用、同步抛错或 5 秒内没有等到会话：显示固定文案并保留草稿。
+    // 只传无参数 startSession：不使用 prompt/其它 options，不会发送消息、不会启动 Agent。
+    // 依据：research/extract/current/workspace-client.js:1500-1528（options 为空时 initializeDraft=false；
+    // target 取「当前工作区 → 最近工作区」，没有工作区时 clearMain 回到新会话窗口）、
+    // :1477-1491 openWorkspaceSession 只做 connectBlank + replaceMain（不发送、不启动 Agent）。
+    function fillPendingFromBar() {
+      if (!pendingBring || state.bring.filling) return;
+      const pending = pendingBring;
+      if (composerBridge.mounted && composerBridge.actions) {
+        const result = fillWorkDraft(pending.composed);
+        if (result === 'ok') {
+          clearPendingBring();
+          record('已填入待带入草稿（' + pending.chars + ' 字，未发送）');
+          showBringToast('已填入（' + pending.chars + ' 字，未发送）');
+          return;
+        }
+        if (result === 'failed') {
+          showBringToast('填入失败：请等输入框就绪后再点一次（不会覆盖已有草稿）');
+          return;
+        }
+        // 'no-session'：挂载状态刚好失效，改走新建空白会话路径
+      }
+      startSessionForPendingBring();
+    }
+
+    // 无挂载会话时：让 DSH 新建并打开一个空白会话（不传任何 options、不用 prompt），
+    // 随后由 ComposerBridge 判定「来源是新会话窗口」时自动填入一次。
+    // 服务通过 ctx.get('uiWorkspace') 惰性获取（该服务由官方 ui-workspace 包提供，
+    // 第三方插件同样可用；参考 dsh-better-sidebar lib/client.js:18264-18265 的用法）。
+    function startSessionForPendingBring() {
+      let uiWorkspace = null;
+      try {
+        uiWorkspace = appCtx ? appCtx.get('uiWorkspace') : null;
+      } catch {
+        uiWorkspace = null;
+      }
+      if (!uiWorkspace || typeof uiWorkspace.startSession !== 'function') {
+        showBringToast(BRING_NO_TARGET_TEXT);
+        return;
+      }
+      state.bring.filling = true;
+      notify();
+      try {
+        uiWorkspace.startSession(); // undefined：不传 options，不用 prompt，不发送消息
+      } catch {
+        state.bring.filling = false;
+        notify();
+        showBringToast(BRING_NO_TARGET_TEXT);
+        return;
+      }
+      if (pendingFillTimer) clearTimeout(pendingFillTimer);
+      pendingFillTimer = setTimeout(() => {
+        pendingFillTimer = null;
+        if (!state.bring.filling) return;
+        state.bring.filling = false;
+        notify();
+        if (pendingBring) showBringToast(BRING_NO_TARGET_TEXT);
+      }, 5000);
+    }
+
+    // 提示条按钮「取消」：立即丢弃内存中的待带入草稿。
+    function cancelPendingBring() {
+      if (!pendingBring) return;
+      clearPendingBring();
+      record('已取消待带入草稿');
     }
 
     function submitBring() {
@@ -634,47 +795,65 @@ window.__ModuleLoader__.load({
         });
     }
 
-    // 把「模板 + 选中文字」只填入工作模式输入框（不发送）；失败时回退到原对话框并给原提示。
+    // 每次「带入工作」都只把「模板 + 选中文字」放入内存待带入草稿，并切到工作模式显示提示条；
+    // 不再立即插入当前会话。正文只在内存里，日志只记录固定文字与字数。
     function deliverBringText(composed, chars, truncated) {
-      state.bring.busy = true;
+      // 带入时的来源会话：只看桥接组件当前是否真的挂载（不要用可能过期的「最近一次会话」）。
+      // mounted=true 表示带入发生在已有会话里；mounted=false 表示发生在「新会话窗口」，
+      // 此时 originSessionId 记 null，之后在任意会话桥接挂载都算「选定」，允许自动填入。
+      const originSessionId =
+        composerBridge.mounted && composerBridge.sessionId ? composerBridge.sessionId : null;
       if (state.mode !== 'work') switchMode('work');
-      setTimeout(() => {
-        const result = fillWorkDraft(composed);
-        state.bring.busy = false;
-        if (result === 'ok') {
-          // 只记录固定文字与字数；正文立即丢弃（不写存储、不打印）
-          record('已带入选中文字（' + chars + ' 字，未发送）');
-          if (truncated) {
-            showBringToast(
-              '选中文字超过 ' +
-                BRING_SELECTION_MAX_CHARS +
-                ' 字，已截断到 ' +
-                BRING_SELECTION_MAX_CHARS +
-                ' 字',
-            );
-          }
-          if (state.bring.open) closeBringDialog();
-          notify();
-          return;
-        }
-        openBringDialog('');
-        state.bring.error =
-          result === 'no-session'
-            ? '工作模式还没有打开的会话：请先在「工作」里新建或打开一个会话，再重新点「带入工作」。'
-            : '填入失败：输入框暂时不可用，请重试或手动粘贴到输入框。';
-        state.bring.text = composed;
-        notify();
-      }, 120);
+      setPendingBring(composed, chars, truncated, originSessionId);
+      state.bring.busy = false;
+      record('已带入选中文字（' + chars + ' 字，等待选择会话）');
+      if (state.bring.open) closeBringDialog();
+      if (truncated) {
+        showBringToast(
+          '选中文字超过 ' +
+            BRING_SELECTION_MAX_CHARS +
+            ' 字，已截断到 ' +
+            BRING_SELECTION_MAX_CHARS +
+            ' 字',
+        );
+      }
+      notify();
     }
 
+    // conversation.input.left 的桥接组件（session 作用域；hero 与 composer 两种输入条都会渲染，
+    // 因此空白会话的新会话窗口也能挂上桥、拿到 inputActions + sessionId）。
+    // 把「当前是否挂载」「当前会话 id」「inputActions」存到模块变量；绝不调用 submit。
+    // 待带入草稿的自动填入规则：
+    //   - 带入时已有会话（originSessionId 非空）：只有切到另一个/新建会话才自动填入一次；
+    //   - 带入时在新会话窗口（originSessionId 为 null）：之后在任意会话挂载都算「选定」，自动填入一次；
+    //   - 每个 pending 只自动尝试一次（模块级 pendingAutoAttemptedId，模式来回切换/重新挂载都不会重复）；
+    //   - 失败不清除草稿，留给提示条手动重试；正文始终只在内存里。
     function ComposerBridge(props) {
-      const actions = props && props.inputActions;
-      const sessionId = props && props.sessionId;
+      const actions = (props && props.inputActions) || null;
+      const sessionId = (props && props.sessionId) || null;
       React.useEffect(() => {
-        composerBridge = { sessionId: sessionId || null, actions: actions || null };
+        composerBridge = { mounted: true, sessionId, actions };
+        notify();
+        const pending = pendingBring;
+        if (pending && sessionId && actions && pendingAutoAttemptedId !== pending.id) {
+          const fromNewSessionWindow = pending.originSessionId === null;
+          const switchedToAnotherSession =
+            pending.originSessionId !== null && sessionId !== pending.originSessionId;
+          if (fromNewSessionWindow || switchedToAnotherSession) {
+            pendingAutoAttemptedId = pending.id; // 每个 pending 只自动尝试一次
+            const result = fillWorkDraft(pending.composed);
+            if (result === 'ok') {
+              clearPendingBring();
+              record('已自动填入待带入草稿（' + pending.chars + ' 字，未发送）');
+              showBringToast('已填入（' + pending.chars + ' 字，未发送）');
+            } else {
+              record('待带入草稿自动填入未完成，等待手动重试');
+            }
+          }
+        }
         return () => {
-          if (composerBridge.actions === (actions || null)) {
-            composerBridge = { sessionId: null, actions: null };
+          if (composerBridge.mounted && composerBridge.sessionId === sessionId) {
+            composerBridge = { mounted: false, sessionId: null, actions: null };
           }
         };
       }, [actions, sessionId]);
@@ -1155,19 +1334,22 @@ window.__ModuleLoader__.load({
       const opts = options || {};
       const active = opts.active === true;
       const warn = opts.tone === 'warn';
+      const disabled = opts.disabled === true;
       return h(
         'button',
         {
           type: 'button',
           title: opts.title || label,
-          onClick,
+          disabled,
+          onClick: disabled ? undefined : onClick,
           style: {
             font: 'inherit',
             fontSize: 12,
             lineHeight: '18px',
             padding: '3px 10px',
             borderRadius: 6,
-            cursor: 'pointer',
+            cursor: disabled ? 'default' : 'pointer',
+            opacity: disabled ? 0.5 : 1,
             border: '1px solid ' + (active ? 'transparent' : BORDER_COLOR),
             background: active
               ? warn
@@ -1724,13 +1906,66 @@ window.__ModuleLoader__.load({
               '带入模板）与 dsh-chat-mode:login:v1（仅 userToken 一项，明文，默认关闭）；' +
               '不读取 document.cookie、其它 localStorage 项、IndexedDB 或页面内容；' +
               '读到的选中文字只放内存，用完即清，不写任何存储。\n' +
-              '带入工作模式：只调用 inputActions.setDraft 填入（模板 + 选中文字），绝不自动发送；' +
+              '带入工作模式：只调用 inputActions.captureInsertion + insertText 在光标处插入' +
+              '（模板 + 选中文字），不覆盖输入框已有内容、绝不自动发送；没有可用会话时暂存为' +
+              '内存中的待带入草稿（最多 10 分钟），由工作模式顶部提示条自动/手动填入；' +
               '不读取聊天记录或输入框已有内容；内容不保存、不上报。\n' +
               '登录恢复：「保存登录」只在用户点击、开关开启且当前 origin 为 https://chat.deepseek.com 时执行；' +
               '恢复只在首次加载后尝试一次，失败自动清除副本并静默回到正常登录页，不弹错；' +
               '用户主动退出后本次运行不再自动恢复。',
           ),
         ),
+      );
+    }
+
+    // 工作模式顶部「待带入草稿」提示条：
+    // 每次带入都显示，让用户选择目标会话；按钮任何时候都可点（不再按有无会话置灰）。
+    // 位置固定在标题栏下方居中（zIndex 35，低于诊断面板 40、高于聊天层），不遮挡标题栏控件。
+    function PendingBringBar() {
+      useSpike();
+      const pending = state.bring.pending;
+      if (state.mode !== 'work' || !pending) return null;
+      // 当前是否已有挂载的会话输入框：只影响提示文案，不再影响按钮可用性。
+      const bridgeMounted = !!(composerBridge && composerBridge.mounted && composerBridge.sessionId);
+      return h(
+        'div',
+        {
+          style: {
+            position: 'fixed',
+            top:
+              'calc(var(--dsh-windows-titlebar-height, ' +
+              TITLEBAR_HEIGHT_FALLBACK +
+              'px) + 8px)',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 35,
+            pointerEvents: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            maxWidth: 'min(640px, calc(100vw - 32px))',
+            boxSizing: 'border-box',
+            padding: '7px 12px',
+            borderRadius: 8,
+            background: 'var(--dsw-alias-bg-base, #fff)',
+            border: '1px solid ' + BORDER_COLOR,
+            color: LABEL_COLOR,
+            fontSize: 12,
+            boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+          },
+        },
+        h(
+          'span',
+          { style: { whiteSpace: 'normal' } },
+          bridgeMounted
+            ? '已带入 ' + pending.chars + ' 字。请选择或新建一个会话，选定后自动填入；也可以点『填入当前会话』'
+            : '已带入 ' + pending.chars + ' 字。点『填入当前会话』会新建一个空白会话并填入；也可以选择已有会话',
+        ),
+        button('填入当前会话', fillPendingFromBar, {
+          disabled: state.bring.filling === true,
+          title: state.bring.filling ? '正在新建会话，等待自动填入…' : '填入当前会话',
+        }),
+        button('取消', cancelPendingBring),
       );
     }
 
@@ -2170,6 +2405,7 @@ window.__ModuleLoader__.load({
         // 聊天层可见时隐藏 DSH 标题栏「收起侧栏」按钮（受控样式，无 UI）
         h(SidebarToggleHider),
         h(TitlebarControls),
+        h(PendingBringBar),
         h(DiagnosticsPanel),
         h(BringDialog),
         // 一键带入的短暂提示（固定文字，不显示选中文字正文）
@@ -2202,11 +2438,14 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      appCtx = ctx;
       try {
         // 插件卸载 / apply 失败时的统一清理：撤销受控隐藏（属性 + <style>）+ 释放 webview 租约。
         // ctx.effect 的返回值即清理函数，插件卸载时由 Cordis 调用。
         ctx.effect(
           () => () => {
+            appCtx = null;
+            clearPendingBring();
             clearSidebarToggleHiding();
             releaseWebview();
           },
@@ -2226,10 +2465,12 @@ window.__ModuleLoader__.load({
             ChatSettingsPage,
           ),
         );
-        // 无 UI 桥接组件：在 session 作用域拿到 inputActions，供「带入工作模式」调用 setDraft
-        ctx.slots.inject('conversation.composer.dock', () =>
+        // 无 UI 桥接组件：挂到 session 作用域的 conversation.input.left。
+        // 该位置在 hero 与 composer 两种输入条里都会渲染（空白会话的新会话窗口也能挂上桥），
+        // 并通过标准 prop 提供 inputActions + sessionId，供「带入工作模式」在光标处插入草稿。
+        ctx.slots.inject('conversation.input.left', () =>
           ctx.slots.register(
-            { name: 'conversation.composer.dock', id: 'chat-mode-input-bridge', order: 50 },
+            { name: 'conversation.input.left', id: 'chat-mode-input-bridge', order: 50 },
             ComposerBridge,
           ),
         );
