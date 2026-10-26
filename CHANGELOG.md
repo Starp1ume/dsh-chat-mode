@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.2.0-beta.1（草稿，未发布）
+## 0.2.0-beta.1 — 2026-10-27（预发布）
 
 ### 新增
+
+- README 增加聊天 / 工作模式的打码截图，并通过 `screenshots.json` 声明市场展示顺序。
 
 - 发布前 secret 扫描：`scripts/scan-secrets.mjs`（本地可跑，支持 `--staged` / `--history` / `--all` / `--dir`）与 `.github/workflows/secret-scan.yml`（push / PR / merge queue 自动跑）。两者不包含在 npm 打包产物里（不在 `package.json` 的 `files` 中），但 `git clone` 安装时会随仓库下载。
 - `.github/workflows/release.yml`：打 `v*` tag 时先跑同一套扫描，通过后才创建 GitHub Release，并校验 tag 与 `package.json` 版本一致。
