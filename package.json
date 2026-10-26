@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-chat-mode",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.1",
   "private": true,
   "type": "module",
   "description": "Chat / Work dual mode for DSH: Chat mode embeds the official DeepSeek web chat in a leased Electron webview (no plugin-side network calls, no API usage in Chat mode); Work mode is the normal DSH agent UI.",

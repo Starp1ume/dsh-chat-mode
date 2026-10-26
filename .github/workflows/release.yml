@@ -70,4 +70,9 @@ jobs:
       - name: 创建 GitHub Release（扫描已通过才会执行）
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag
+        run: |
+          release_flags=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag "${release_flags[@]}"
