@@ -17,7 +17,7 @@
 //     （不覆盖已有草稿、不发送）；没有选中文字 / 脚本失败时回退到原来的粘贴对话框；
 //     没有可用会话时暂存为「待带入草稿」（纯内存、最多 10 分钟），
 //     工作模式顶部提示条供用户选择「填入当前会话」或「取消」
-//   - 登录恢复（可选，默认关）：只处理 localStorage.userToken 一项，明文存插件
+//   - 登录恢复（默认开启，可关闭）：自动保存 localStorage.userToken 一项，明文存插件
 //     localStorage；恢复失败自动清除；详细方案见 research/formal-plan.md §7
 //
 // 明确不做：
@@ -150,7 +150,7 @@ window.__ModuleLoader__.load({
       webUrl: DEFAULT_WEB_URL, // 网页版地址（https + 无凭据校验后保存）
       webUrlConfirmedHost: null, // 非 deepseek.com 域名：用户二次确认过的 hostname（否则不放行）
       rememberLast: false, // 是否记住上次使用的模式
-      rememberLogin: false, // 是否记住登录（默认关；只处理 userToken）
+      rememberLogin: true, // 是否自动记住登录（默认开；只处理 userToken）
       lastMode: 'chat', // 内部值：上次模式（rememberLast 开启时使用）
       diagOpen: false, // 诊断面板是否展开（仅本地界面偏好）
       bringTemplate: DEFAULT_BRING_TEMPLATE, // 「带入工作」一键带入时加在选中文字前的模板
@@ -221,7 +221,7 @@ window.__ModuleLoader__.load({
           ? confirmedHost
           : null;
       prefs.rememberLast = parsed.rememberLast === true;
-      prefs.rememberLogin = parsed.rememberLogin === true;
+      if (typeof parsed.rememberLogin === 'boolean') prefs.rememberLogin = parsed.rememberLogin;
       prefs.lastMode = parsed.lastMode === 'work' ? 'work' : 'chat';
       prefs.diagOpen = parsed.diagOpen === true;
       if (typeof parsed.bringTemplate === 'string') {
@@ -304,7 +304,7 @@ window.__ModuleLoader__.load({
     let restoreAttempted = false; // 本次 webview 生命周期内是否已尝试恢复
     let restoreReloaded = false; // 是否已为恢复写回并触发过一次 reload
     let loggedOutThisRun = false; // 本次运行内检测到用户主动退出后，不再自动恢复
-    // 退出检测的启用条件：本次运行内已确认登录（恢复成功，或用户本次点击「保存登录」成功）。
+    // 退出检测的启用条件：本次运行内已确认登录（恢复成功，或自动 / 手动保存成功）。
     // 启动时仅从存储载入副本不算确认登录，因此登录页先闪一下的那次导航不会误清副本。
     let loginConfirmedThisRun = false;
 
@@ -384,7 +384,7 @@ window.__ModuleLoader__.load({
     function handleSignInNavigation(url) {
       if (!loginConfirmedThisRun) return false;
       if (restoreReloaded) return false; // 恢复写回触发的 reload 过程不算主动退出
-      if (!url || !isSignInPathname(url)) return false;
+      if (!isChatOrigin(url) || !isSignInPathname(url)) return false;
       loggedOutThisRun = true;
       loginConfirmedThisRun = false;
       dropSavedLogin('检测到已退出登录');
@@ -959,7 +959,7 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
-    // 登录恢复（正式功能，可选，仅限 userToken 一项；默认关闭）
+    // 登录恢复（自动保存，仅限 userToken 一项；默认开启，可关闭）
     // ------------------------------------------------------------------
     // 说明：token 视为不透明字符串，不打印、不记录、不上报；只写进插件自己的
     // localStorage 键 LOGIN_KEY（明文，设置页有风险提示），只写回官方站点页面的
@@ -1035,15 +1035,25 @@ window.__ModuleLoader__.load({
         });
     }
 
-    // 保存时机之三：恢复成功后刷新已保存副本（站点可能轮换/刷新了 token）。
-    function refreshSavedTokenAfterRestore(view) {
-      if (!prefs.rememberLogin) return;
-      if (typeof view.executeJavaScript !== 'function') return;
+    // 开关开启时，在页面加载完成、主框架站内跳转和开启开关时自动保存。
+    // 只读官方聊天页的 userToken；令牌未变化时不重复写入，不轮询。
+    function autoSaveLogin(view) {
+      if (!prefs.rememberLogin || !view || state.login.status === 'restoring') return;
+      if (!isOfficialChatSite() || typeof view.executeJavaScript !== 'function') return;
+      const currentUrl = typeof view.getURL === 'function' ? view.getURL() : '';
+      if (!isChatOrigin(currentUrl) || isSignInPathname(currentUrl)) return;
       Promise.resolve()
         .then(() => view.executeJavaScript(SCRIPT_READ_USER_TOKEN))
         .then((token) => {
+          // 读取可能等待页面加载：期间关闭开关或退出登录后，不再保存。
+          if (!prefs.rememberLogin) return;
+          const url = typeof view.getURL === 'function' ? view.getURL() : '';
+          if (!isChatOrigin(url) || isSignInPathname(url)) return;
           if (typeof token !== 'string' || token.length === 0) return;
-          if (token === savedUserToken) return; // 未变化：不重复写
+          loginConfirmedThisRun = true;
+          loggedOutThisRun = false;
+          restoreAttempted = true; // 本次已经登录，后续导航不再注入旧副本或重载。
+          if (token === savedUserToken) return;
           const savedAt = writeLoginStore(token);
           if (savedAt <= 0) return;
           savedUserToken = token;
@@ -1051,11 +1061,13 @@ window.__ModuleLoader__.load({
           state.login.saved = true;
           state.login.savedLength = token.length;
           state.login.savedAt = savedAt;
-          record('登录恢复：已更新保存副本（长度 ' + token.length + '）');
+          if (state.login.status !== 'restored') state.login.status = 'saved';
+          state.login.error = '';
+          record('已自动保存登录信息（长度 ' + token.length + '）');
           notify();
         })
         .catch(() => {
-          // 静默：更新副本失败不影响使用
+          // 自动保存失败保持静默，保留已有副本，后续正常导航时再检查。
         });
     }
 
@@ -1089,7 +1101,7 @@ window.__ModuleLoader__.load({
           record('登录恢复：已恢复');
           notify();
           // 恢复成功后刷新已保存副本（token 可能被站点轮换）
-          refreshSavedTokenAfterRestore(view);
+          autoSaveLogin(view);
         })
         .catch(() => {
           dropSavedLogin('路径检查失败');
@@ -1124,6 +1136,7 @@ window.__ModuleLoader__.load({
       Promise.resolve()
         .then(() => element.executeJavaScript(SCRIPT_READ_USER_TOKEN))
         .then((token) => {
+          if (!prefs.rememberLogin) return;
           if (typeof token !== 'string' || token.length === 0) {
             state.login.status = 'error';
             state.login.error = '页面中没有可读取的 userToken（可能尚未登录）';
@@ -1146,7 +1159,9 @@ window.__ModuleLoader__.load({
           state.login.savedAt = savedAt;
           state.login.status = 'saved';
           state.login.error = '';
-          loginConfirmedThisRun = true; // 用户本次点击保存成功 → 之后才启用退出检测
+          loginConfirmedThisRun = true;
+          loggedOutThisRun = false;
+          restoreAttempted = true;
           record('登录信息已保存（长度 ' + token.length + '）');
           notify();
         })
@@ -1158,9 +1173,12 @@ window.__ModuleLoader__.load({
         });
     }
 
-    // 「清除已保存登录」：删除插件自己的 localStorage 键，并清空内存中的 token。
+    // 清除时同时关闭自动保存，避免仍登录的页面在下一次导航时把副本存回。
     function clearSavedLogin() {
+      savePrefs({ rememberLogin: false });
       clearLoginStore();
+      loginConfirmedThisRun = false;
+      loggedOutThisRun = true;
       savedUserToken = null;
       savedTokenAt = 0;
       restoreAttempted = false;
@@ -1240,6 +1258,7 @@ window.__ModuleLoader__.load({
             record('did-stop-loading');
             // 恢复写回后 reload 完成时只读 pathname 判断结果；恢复进行中继续保持遮罩
             checkLoginPageResult(view);
+            autoSaveLogin(view);
           });
           view.addEventListener('did-navigate', (event) => {
             state.counters.navigate += 1;
@@ -1254,13 +1273,14 @@ window.__ModuleLoader__.load({
             // 若恢复没有发生，这是第一个排查点（确认 did-navigate 是否到达、url 是否已是 chat 域）。
             maybeRestoreLogin(view);
           });
-          // 页面内跳转（SPA 路由）不会触发 did-navigate；补一次同规则的退出检测。
-          // 只用事件自带的 url / isMainFrame，不执行页面脚本、不读页面存储。
+          // SPA 登录 / 退出不会触发 did-navigate；主框架跳转时检测退出或自动保存。
           view.addEventListener('did-navigate-in-page', (event) => {
             if (!event || event.isMainFrame !== true) return;
             state.counters.navigateInPage += 1;
             record('did-navigate-in-page（页面内导航）');
-            handleSignInNavigation(typeof event.url === 'string' ? event.url : '');
+            if (!handleSignInNavigation(typeof event.url === 'string' ? event.url : '')) {
+              autoSaveLogin(view);
+            }
           });
           view.addEventListener('did-fail-load', (event) => {
             const code = event && typeof event.errorCode === 'number' ? event.errorCode : 0;
@@ -1853,7 +1873,7 @@ window.__ModuleLoader__.load({
           state.phase === 'failed' ? button('重试创建', retryWebview) : null,
           button('重置为聊天', () => switchMode('chat')),
         ),
-        // 登录恢复：单独一行，只在用户点击时执行；「保存」需当前 origin 为 chat.deepseek.com
+        // 登录恢复：自动保存之外，仍提供立即保存与关闭并清除入口。
         h(
           'div',
           {
@@ -1867,8 +1887,8 @@ window.__ModuleLoader__.load({
             },
           },
           h('span', { style: { opacity: 0.8 } }, '登录恢复：'),
-          button('保存登录', saveLogin),
-          state.login.saved ? button('清除已保存登录', clearSavedLogin) : null,
+          button('立即保存登录', saveLogin),
+          state.login.saved ? button('关闭并清除登录', clearSavedLogin) : null,
         ),
         h(
           'div',
@@ -1903,14 +1923,15 @@ window.__ModuleLoader__.load({
               'executeJavaScript 只用于登录恢复（固定脚本，token 仅作数据传入）与「带入工作」' +
               '读取 window.getSelection().toString()（用户点击、官方 origin 完全相等时，固定脚本）。\n' +
               '存储声明：只写插件自己的 localStorage 两个键——dsh-chat-mode:prefs:v1（设置/模式偏好/' +
-              '带入模板）与 dsh-chat-mode:login:v1（仅 userToken 一项，明文，默认关闭）；' +
+              '带入模板）与 dsh-chat-mode:login:v1（仅 userToken 一项，明文，默认开启，可关闭）；' +
               '不读取 document.cookie、其它 localStorage 项、IndexedDB 或页面内容；' +
               '读到的选中文字只放内存，用完即清，不写任何存储。\n' +
               '带入工作模式：只调用 inputActions.captureInsertion + insertText 在光标处插入' +
               '（模板 + 选中文字），不覆盖输入框已有内容、绝不自动发送；没有可用会话时暂存为' +
               '内存中的待带入草稿（最多 10 分钟），由工作模式顶部提示条自动/手动填入；' +
               '不读取聊天记录或输入框已有内容；内容不保存、不上报。\n' +
-              '登录恢复：「保存登录」只在用户点击、开关开启且当前 origin 为 https://chat.deepseek.com 时执行；' +
+              '登录恢复：默认开启，在官方聊天页加载完成或主框架站内跳转时自动保存 userToken；手动按钮可立即保存；' +
+              '关闭或清除后停止保存；' +
               '恢复只在首次加载后尝试一次，失败自动清除副本并静默回到正常登录页，不弹错；' +
               '用户主动退出后本次运行不再自动恢复。',
           ),
@@ -2284,22 +2305,27 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { style: rowStyle },
-            checkbox('记住登录（只保存 userToken 一项）', prefs.rememberLogin, (checked) => {
-              updatePrefs({ rememberLogin: checked });
-              if (!checked) clearSavedLogin(); // 关闭即清除已保存副本
+            checkbox('自动记住登录（只保存 userToken 一项）', prefs.rememberLogin, (checked) => {
+              if (checked) {
+                updatePrefs({ rememberLogin: true });
+                autoSaveLogin(element);
+              } else {
+                clearSavedLogin();
+              }
             }),
           ),
           h(
             'div',
             { style: { ...rowStyle, marginTop: 8 } },
             h('span', null, '状态：' + loginLabel),
-            button('保存当前登录', saveLogin),
-            state.login.saved ? button('清除已保存登录', clearSavedLogin) : null,
+            button('立即保存登录', saveLogin),
+            state.login.saved ? button('关闭并清除登录', clearSavedLogin) : null,
           ),
           h(
             'div',
             { style: { ...hintStyle, marginTop: 8 } },
-            '说明：仅在开关开启且网页为官方 chat.deepseek.com 时生效；保存在本机插件 localStorage（明文，同源脚本理论上可读）。' +
+            '说明：默认开启，登录成功后自动保存，无需手动点保存；已有的关闭设置会保留。仅对官方 chat.deepseek.com 生效；' +
+              '保存在本机插件 localStorage（明文，同源脚本理论上可读）；关闭或清除会停止自动保存并删除副本。' +
               '恢复失败会自动清除副本；你在网页里主动退出后，本次运行不会再自动登录。token 有效期尚未验证。',
           ),
         ),
