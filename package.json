@@ -33,5 +33,8 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "scripts": {
+    "pack:npm": "node scripts/pack-npm.mjs"
   }
 }

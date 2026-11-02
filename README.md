@@ -91,6 +91,8 @@
 
 ## 开发与发布自查
 
+并行 npm 分发包名为 `@starplume/dsh-chat-mode`。运行 `npm run pack:npm`，会在系统临时目录生成 `.tgz`；仅在打包副本里同步转换包名、bundle 引用和客户端模块 id，并添加指向本仓库的 `repository` 元数据。仓库本身继续使用 `@local/dsh-chat-mode`，不会修改现有安装。脚本只打包，不自动发布。npm 安装命令为 `dsh plugin --profile desktop add @starplume/dsh-chat-mode`；切换安装渠道前先移除旧来源，避免重复加载。
+
 仓库自带一个 secret 扫描脚本，供本地自查和 GitHub Actions 使用。它**不包含在 npm 打包产物里**（`scripts/` 与 `.github/` 不在 `package.json` 的 `files` 列表）；但如果通过 `git clone` 安装，这两个目录仍会随仓库下载到本机，只是插件运行时不会用到它们。
 
 ```powershell
