@@ -29,7 +29,7 @@
 // ============================================================================
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-chat-mode',
+  id: '@starplume/dsh-chat-mode',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
