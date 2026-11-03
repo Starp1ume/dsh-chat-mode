@@ -28,8 +28,18 @@
 
 前置条件：Windows 上的 DSH 桌面端（当前基础验证版本为 0.2.1-rc.5），并且当前会话可以执行工具（plugin_manager）。
 
+推荐从 npm 安装（无需 GitHub 的 Git 连接）：
+
+```powershell
+dsh plugin --profile desktop add @starplume/dsh-chat-mode
+```
+
+**旧开发版迁移**：如果已安装 `@local/dsh-chat-mode`，先完全退出 DSH，执行 `dsh plugin --profile desktop remove @local/dsh-chat-mode`，再安装上面的 npm 包；本地开发者改用 `dsh plugin --profile desktop add D:\path\to\dsh-chat-mode` 重新建立目录链接。请勿同时启用两个包名。插件设置与登录副本的存储键未变，迁移无需清除；不要执行卸载章节中的「关闭并清除登录」。
+
+以下为本地源码开发安装方式：
+
 1. 克隆本仓库（`git clone https://github.com/Starp1ume/dsh-chat-mode.git dsh-chat-mode`）。
-2. 保持该目录在原位。安装时 DSH 会把它以 **Junction（目录链接）** 的方式链到 profile 的 `node_modules/@local/dsh-chat-mode`，**之后不要移动、重命名或删除该目录**，否则插件会失效。
+2. 保持该目录在原位。安装时 DSH 会把它以 **Junction（目录链接）** 的方式链到 profile 的 `node_modules/@starplume/dsh-chat-mode`，**之后不要移动、重命名或删除该目录**，否则插件会失效。
 3. 在 DSH 的对话里让 agent 安装，例如：
 
    > 用 plugin_manager 的 install_bundle 安装插件，target 为 `D:\path\to\dsh-chat-mode`（填本目录的绝对路径）。
@@ -51,16 +61,16 @@
 ## 卸载
 
 1. 打开「设置 → 聊天模式」，先点「关闭并清除登录」（如果存在已保存的登录）。**如果跳过这一步，登录信息会留在本机，卸载后无法再通过插件清除。**
-2. 在 DSH 对话里让 agent 执行 `plugin_manager` → `remove_bundle`，`target: @local/dsh-chat-mode`。
-3. 完全退出 DSH 后，检查 `C:\Users\<你的用户名>\.dsh\profiles\desktop\node_modules\@local\` 下是否还残留 `dsh-chat-mode` 目录链接。若残留，用 **cmd** 删除（**不要带 `/s`，不要用 `Remove-Item -Recurse`**）：
+2. 在 DSH 对话里让 agent 执行 `plugin_manager` → `remove_bundle`，`target: @starplume/dsh-chat-mode`。
+3. 完全退出 DSH 后，检查 `C:\Users\<你的用户名>\.dsh\profiles\desktop\node_modules\@starplume\` 下是否还残留 `dsh-chat-mode` 目录链接。若残留，用 **cmd** 删除（**不要带 `/s`，不要用 `Remove-Item -Recurse`**）：
 
    ```
-   cmd /c rmdir "C:\Users\<你的用户名>\.dsh\profiles\desktop\node_modules\@local\dsh-chat-mode"
+   cmd /c rmdir "C:\Users\<你的用户名>\.dsh\profiles\desktop\node_modules\@starplume\dsh-chat-mode"
    ```
 
 4. 重新启动 DSH。
 
-> 注意：`remove_bundle` 不一定会自动删除指向仓库目录的 Junction，残留链接需要按上面第 3 步手动清理；清理前请先确认目标目录确实是 `node_modules\@local\dsh-chat-mode`。
+> 注意：`remove_bundle` 不一定会自动删除指向仓库目录的 Junction，残留链接需要按上面第 3 步手动清理；清理前请先确认目标目录确实是 `node_modules\@starplume\dsh-chat-mode`。
 
 ## 隐私说明
 
@@ -91,7 +101,7 @@
 
 ## 开发与发布自查
 
-并行 npm 分发包名为 `@starplume/dsh-chat-mode`。运行 `npm run pack:npm`，会在系统临时目录生成 `.tgz`；仅在打包副本里同步转换包名、bundle 引用和客户端模块 id，并添加指向本仓库的 `repository` 元数据。仓库本身继续使用 `@local/dsh-chat-mode`，不会修改现有安装。脚本只打包，不自动发布。npm 安装命令为 `dsh plugin --profile desktop add @starplume/dsh-chat-mode`；切换安装渠道前先移除旧来源，避免重复加载。
+GitHub 源码与 npm 分发统一使用 `@starplume/dsh-chat-mode`，清单包名、bundle 引用和客户端模块 id 保持一致，供市场自动关联。运行 `npm run pack:npm` 会在系统临时目录生成 `.tgz`，并添加 npm 发布元数据；脚本只打包，不自动发布。仓库保留 `private: true` 防止直接发布开发目录，打包副本会移除它。
 
 仓库自带一个 secret 扫描脚本，供本地自查和 GitHub Actions 使用。它**不包含在 npm 打包产物里**（`scripts/` 与 `.github/` 不在 `package.json` 的 `files` 列表）；但如果通过 `git clone` 安装，这两个目录仍会随仓库下载到本机，只是插件运行时不会用到它们。
 

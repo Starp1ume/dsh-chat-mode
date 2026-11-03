@@ -1,4 +1,4 @@
 - insert:
     - id: chat-mode
-      name: '@local/dsh-chat-mode'
+      name: '@starplume/dsh-chat-mode'
       config: {}

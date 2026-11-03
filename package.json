@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-chat-mode",
+  "name": "@starplume/dsh-chat-mode",
   "version": "0.2.0-beta.2",
   "private": true,
   "type": "module",

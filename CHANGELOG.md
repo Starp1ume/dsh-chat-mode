@@ -1,5 +1,11 @@
 # Changelog
 
+## 未发布
+
+### 修复
+
+- GitHub 清单、bundle 引用与客户端模块 id 统一为 npm 包名 `@starplume/dsh-chat-mode`，使市场可按仓库包名自动关联已发布的 npm 包；打包脚本不再转换身份。README 补充旧 `@local` 开发安装的迁移方法，设置和登录副本的存储键不变。
+
 ## 0.2.0-beta.2 — 2026-11-01（预发布）
 
 ### 新增
